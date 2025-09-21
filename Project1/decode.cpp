@@ -1,171 +1,357 @@
+#include <opencv2/opencv.hpp>
 #include <iostream>
 #include <fstream>
 #include <vector>
 #include <string>
-#include <sstream>
-#include <cstdlib>
 #include <cmath>
-#include <windows.h>
-#include <direct.h> // ç”¨äºåˆ›å»ºç›®å½•
-#include <cstdint>
+#include <algorithm>
+#include <iterator>
+#include <limits>
 
+using namespace cv;
 using namespace std;
 
-// BMPæ–‡ä»¶å¤´ç»“æ„
-#pragma pack(push, 1)
-struct BMPHeader {
-    uint16_t signature; // "BM"
-    uint32_t fileSize;
-    uint16_t reserved1;
-    uint16_t reserved2;
-    uint32_t dataOffset;
-};
+// Óë±àÂëÆ÷Ò»ÖÂµÄ²ÎÊı
+namespace CodeParams
+{
+    constexpr int FrameSize = 108;
+    constexpr int BytesPerFrame = 1242;
+    constexpr int SafeAreaWidth = 2;
+    constexpr int QrPointSize = 18;
+    constexpr int SmallQrPointbias = 6;
+    constexpr int RectAreaCount = 7;
 
-struct BMPInfoHeader {
-    uint32_t headerSize;
-    int32_t width;
-    int32_t height;
-    uint16_t planes;
-    uint16_t bitsPerPixel;
-    uint32_t compression;
-    uint32_t imageSize;
-    int32_t xPixelsPerMeter;
-    int32_t yPixelsPerMeter;
-    uint32_t colorsUsed;
-    uint32_t colorsImportant;
-};
-#pragma pack(pop)
+    // ÇøÓò¶¨Òå£¨Óë±àÂëÆ÷ÍêÈ«Ò»ÖÂ£©
+    const int lenlim[RectAreaCount] = { 138, 144, 648, 144, 144, 16, 8 };
+    const int areapos[RectAreaCount][2][2] = {
+        {{69, 16}, {QrPointSize + 3, SafeAreaWidth}},
+        {{16, 72}, {SafeAreaWidth, QrPointSize}},
+        {{72, 72}, {QrPointSize, QrPointSize}},
+        {{72, 16}, {QrPointSize, FrameSize - QrPointSize}},
+        {{16, 72}, {FrameSize - QrPointSize, QrPointSize}},
+        {{8, 16}, {FrameSize - QrPointSize, FrameSize - QrPointSize}},
+        {{8, 8}, {FrameSize - QrPointSize + 8, FrameSize - QrPointSize}}
+    };
+}
 
-// ä»BMPå›¾åƒä¸­æå–å•ä¸ªæ¯”ç‰¹ä¿¡æ¯
-bool extract_bit_from_bmp(const string& filename, bool& is_valid) {
-    ifstream bmp_file(filename, ios::binary);
-    if (!bmp_file) {
-        cerr << "æ— æ³•æ‰“å¼€BMPæ–‡ä»¶: " << filename << endl;
-        is_valid = false;
-        return false;
-    }
+// ÔöÇ¿µÄ¶şÎ¬Âë¶¨Î»º¯Êı
+vector<Point2f> findQRMarkers(const Mat& frame)
+{
+    vector<Point2f> markers;
+    Mat gray, blurred, binary;
 
-    // è¯»å–BMPå¤´
-    BMPHeader bmpHeader;
-    BMPInfoHeader bmpInfoHeader;
+    // ×ª»»Îª»Ò¶ÈÍ¼
+    cvtColor(frame, gray, COLOR_BGR2GRAY);
 
-    bmp_file.read(reinterpret_cast<char*>(&bmpHeader), sizeof(BMPHeader));
-    bmp_file.read(reinterpret_cast<char*>(&bmpInfoHeader), sizeof(BMPInfoHeader));
+    // ¸ßË¹Ä£ºı¼õÉÙÔëÉù
+    GaussianBlur(gray, blurred, Size(3, 3), 0);
 
-    // æ£€æŸ¥æ˜¯å¦æ˜¯æœ‰æ•ˆçš„BMPæ–‡ä»¶
-    if (bmpHeader.signature != 0x4D42) {
-        cerr << "æ— æ•ˆçš„BMPæ–‡ä»¶: " << filename << endl;
-        is_valid = false;
-        return false;
-    }
+    // ×ÔÊÊÓ¦ãĞÖµ´¦Àí
+    adaptiveThreshold(blurred, binary, 255, ADAPTIVE_THRESH_GAUSSIAN_C,
+        THRESH_BINARY, 15, 5);
 
-    // ç§»åŠ¨åˆ°åƒç´ æ•°æ®
-    bmp_file.seekg(bmpHeader.dataOffset, ios::beg);
+    // ²éÕÒÂÖÀª
+    vector<vector<Point>> contours;
+    vector<Vec4i> hierarchy;
+    findContours(binary, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE);
 
-    int width = bmpInfoHeader.width;
-    int height = bmpInfoHeader.height;
-    int rowSize = (width * 3 + 3) & ~3; // æ¯è¡Œå­—èŠ‚æ•°ï¼ˆéœ€è¦4å­—èŠ‚å¯¹é½ï¼‰
+    // Ñ°ÕÒÈı²ãÇ¶Ì×µÄÂÖÀª£¨¶şÎ¬Âë¶¨Î»±ê¼ÇÌØÕ÷£©
+    vector<pair<Point2f, double>> markerCandidates;
 
-    // è¯»å–åƒç´ æ•°æ®
-    vector<uint8_t> pixelData(rowSize * height);
-    bmp_file.read(reinterpret_cast<char*>(pixelData.data()), rowSize * height);
-    bmp_file.close();
+    for (size_t i = 0; i < contours.size(); i++) {
+        if (hierarchy[i][2] != -1) {  // ÓĞ×ÓÂÖÀª
+            int childIdx = hierarchy[i][2];
+            if (hierarchy[childIdx][2] != -1) {  // ×ÓÂÖÀª»¹ÓĞ×ÓÂÖÀª
+                double area = contourArea(contours[i]);
+                double perimeter = arcLength(contours[i], true);
 
-    // è®¡ç®—æ•´å¸§çš„å¹³å‡äº®åº¦
-    long total_brightness = 0;
-    int total_pixels = width * height;
+                if (perimeter > 0) {
+                    double circularity = (4 * CV_PI * area) / (perimeter * perimeter);
 
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int pos = y * rowSize + x * 3;
-            uint8_t b = pixelData[pos];
-            uint8_t g = pixelData[pos + 1];
-            uint8_t r = pixelData[pos + 2];
-
-            total_brightness += (r + g + b) / 3;
+                    // ¶¨Î»±ê¼ÇÓ¦¸ÃÊÇ½üËÆÕı·½ĞÎµÄ
+                    if (circularity > 0.6 && area > 20) {
+                        RotatedRect rect = minAreaRect(contours[i]);
+                        markerCandidates.push_back({ rect.center, area });
+                    }
+                }
+            }
         }
     }
 
-    int avg_brightness = total_brightness / total_pixels;
+    if (markerCandidates.empty()) {
+        return markers;
+    }
 
-    // åˆ¤æ–­å¸§çš„æœ‰æ•ˆæ€§ï¼šå¦‚æœå¹³å‡äº®åº¦æ¥è¿‘çº¯é»‘æˆ–çº¯ç™½ï¼Œåˆ™è®¤ä¸ºæœ‰æ•ˆ
-    is_valid = (avg_brightness < 10) || (avg_brightness > 245);
+    // °´Ãæ»ıÅÅĞò
+    sort(markerCandidates.begin(), markerCandidates.end(),
+        [](const pair<Point2f, double>& a, const pair<Point2f, double>& b) {
+            return a.second > b.second;
+        });
 
-    // åˆ¤æ–­æ¯”ç‰¹å€¼ï¼šå¦‚æœå¹³å‡äº®åº¦å¤§äº128ï¼Œè®¤ä¸ºæ˜¯1ï¼Œå¦åˆ™ä¸º0
-    return avg_brightness > 128;
+    // Ìí¼Ó´óÊ¶±ğµã£¨Ãæ»ı×î´óµÄÇ°Èı¸ö£©
+    for (int i = 0; i < min(3, (int)markerCandidates.size()); i++) {
+        markers.push_back(markerCandidates[i].first);
+    }
+
+    // Ìí¼ÓÓÒÏÂ½ÇĞ¡Ê¶±ğµã£¨Ãæ»ı×îĞ¡µÄµã£©
+    if (markerCandidates.size() >= 4) {
+        markers.push_back(markerCandidates.back().first);
+    }
+    else if (markerCandidates.size() == 3) {
+        // Èç¹ûÃ»ÓĞÕÒµ½Ğ¡µã£¬Ê¹ÓÃ´óµã¼ÆËãÓÒÏÂ½ÇÎ»ÖÃ
+        Point2f avgCenter(0, 0);
+        for (const auto& marker : markers) {
+            avgCenter += marker;
+        }
+        avgCenter.x /= static_cast<float>(markers.size());
+        avgCenter.y /= static_cast<float>(markers.size());
+
+        // ÕÒµ½×î¿¿½üÓÒÏÂ½ÇµÄµã×÷ÎªĞ¡µã
+        Point2f bottomRight(frame.cols, frame.rows);
+        Point2f candidate;
+        double minDist = numeric_limits<double>::max();
+
+        for (const auto& marker : markerCandidates) {
+            double dist = norm(marker.first - bottomRight);
+            if (dist < minDist) {
+                minDist = dist;
+                candidate = marker.first;
+            }
+        }
+        markers.push_back(candidate);
+    }
+
+    return markers;
 }
 
-int main(int argc, char* argv[]) {
+// ÔöÇ¿µÄÍ¸ÊÓĞ£Õıº¯Êı
+Mat correctPerspective(const Mat& frame, const vector<Point2f>& markers)
+{
+    if (markers.size() < 4) {
+        return Mat();
+    }
+
+    // ¶Ô±ê¼Çµã½øĞĞÅÅĞò£º×óÉÏ£¬ÓÒÉÏ£¬×óÏÂ£¬ÓÒÏÂ
+    vector<Point2f> sortedMarkers = markers;
+
+    // °´x×ø±êÅÅĞò
+    sort(sortedMarkers.begin(), sortedMarkers.end(), [](const Point2f& a, const Point2f& b) {
+        return a.x < b.x;
+        });
+
+    vector<Point2f> leftPoints;
+    vector<Point2f> rightPoints;
+
+    for (const auto& pt : sortedMarkers) {
+        if (pt.x < frame.cols / 2) {
+            leftPoints.push_back(pt);
+        }
+        else {
+            rightPoints.push_back(pt);
+        }
+    }
+
+    // °´y×ø±êÅÅĞò×óÓÒµã
+    sort(leftPoints.begin(), leftPoints.end(), [](const Point2f& a, const Point2f& b) {
+        return a.y < b.y;
+        });
+
+    sort(rightPoints.begin(), rightPoints.end(), [](const Point2f& a, const Point2f& b) {
+        return a.y < b.y;
+        });
+
+    // ¹¹½¨Ô´µã¼¯£º×óÉÏ£¬ÓÒÉÏ£¬×óÏÂ£¬ÓÒÏÂ
+    vector<Point2f> srcPoints;
+    if (!leftPoints.empty() && !rightPoints.empty()) {
+        srcPoints.push_back(leftPoints[0]); // ×óÉÏ
+        srcPoints.push_back(rightPoints[0]); // ÓÒÉÏ
+        srcPoints.push_back(leftPoints.back()); // ×óÏÂ
+        srcPoints.push_back(rightPoints.back()); // ÓÒÏÂ
+    }
+    else {
+        srcPoints = markers;
+    }
+
+    // Ä¿±êµã£º×óÉÏ£¬ÓÒÉÏ£¬×óÏÂ£¬ÓÒÏÂ
+    vector<Point2f> dstPoints = {
+        Point2f(0, 0),
+        Point2f(CodeParams::FrameSize, 0),
+        Point2f(0, CodeParams::FrameSize),
+        Point2f(CodeParams::FrameSize, CodeParams::FrameSize)
+    };
+
+    // ¼ÆËãµ¥Ó¦ĞÔ¾ØÕó
+    Mat transform = findHomography(srcPoints, dstPoints, RANSAC, 10.0);
+
+    if (transform.empty()) {
+        return Mat();
+    }
+
+    // Ó¦ÓÃÍ¸ÊÓ±ä»»
+    Mat corrected;
+    warpPerspective(frame, corrected, transform,
+        Size(CodeParams::FrameSize, CodeParams::FrameSize));
+
+    return corrected;
+}
+
+// ¸ßÊı¾İÁ¿±ÈÌØÌáÈ¡º¯Êı£¨Ã¿Ö¡1242×Ö½Ú£©
+vector<uchar> extractDataFromQR(const Mat& correctedFrame)
+{
+    vector<uchar> frameData;
+    Mat gray;
+    cvtColor(correctedFrame, gray, COLOR_BGR2GRAY);
+
+    // Ê¹ÓÃ×ÔÊÊÓ¦ãĞÖµ´¦Àí
+    Mat binary;
+    adaptiveThreshold(gray, binary, 255, ADAPTIVE_THRESH_GAUSSIAN_C,
+        THRESH_BINARY, 15, 5);
+
+    // °´ÕÕ±àÂëÆ÷µÄÇøÓò¶¨ÒåÌáÈ¡Êı¾İ
+    for (int areaID = 0; areaID < CodeParams::RectAreaCount; areaID++) {
+        int rows = CodeParams::areapos[areaID][0][0];
+        int cols = CodeParams::areapos[areaID][0][1];
+        int startY = CodeParams::areapos[areaID][1][0];
+        int startX = CodeParams::areapos[areaID][1][1];
+
+        int bytesToExtract = CodeParams::lenlim[areaID];
+        int extractedBytes = 0;
+
+        for (int row = 0; row < rows && extractedBytes < bytesToExtract; row++) {
+            for (int colByte = 0; colByte < cols / 8 && extractedBytes < bytesToExtract; colByte++) {
+                uchar byte = 0;
+
+                // ÌáÈ¡Ò»¸ö×Ö½Ú£¨8¸ö±ÈÌØ£©
+                for (int bit = 0; bit < 8; bit++) {
+                    int x = startX + colByte * 8 + bit;
+                    int y = startY + row;
+
+                    if (y < binary.rows && x < binary.cols) {
+                        // °×É«ÏñËØ´ú±í1£¬ºÚÉ«´ú±í0
+                        bool pixelValue = (binary.at<uchar>(y, x) > 0);
+                        byte |= (pixelValue << (7 - bit));
+                    }
+                }
+
+                frameData.push_back(byte);
+                extractedBytes++;
+            }
+        }
+    }
+
+    return frameData;
+}
+
+// Ö÷½âÂëº¯Êı
+int main(int argc, char* argv[])
+{
     if (argc != 4) {
-        cerr << "ç”¨æ³•: " << argv[0] << " <è¾“å…¥è§†é¢‘> <è¾“å‡ºæ–‡ä»¶> <æœ‰æ•ˆæ€§æ–‡ä»¶>" << endl;
+        cerr << "Usage: decode <input_video> <output_bin> <validity_bin>" << endl;
         return 1;
     }
 
-    string input_video = argv[1];
-    string output_file = argv[2];
-    string validity_file = argv[3];
+    string inputVideo = argv[1];
+    string outputBin = argv[2];
+    string validityBin = argv[3];
 
-    // ä½¿ç”¨FFmpegæå–è§†é¢‘å¸§
-    _mkdir("video_frames");
-    string cmd = "ffmpeg -i " + input_video + " video_frames/frame_%d.bmp -y";
-    system(cmd.c_str());
-
-    // å¤„ç†æ¯ä¸€å¸§
-    vector<bool> all_bits;
-    vector<bool> all_validity;
-    int frame_count = 1;
-
-    while (true) {
-        stringstream ss;
-        ss << "video_frames/frame_" << frame_count << ".bmp";
-
-        ifstream test_file(ss.str());
-        if (!test_file) break;
-        test_file.close();
-
-        bool is_valid;
-        bool bit = extract_bit_from_bmp(ss.str(), is_valid);
-
-        // æ·»åŠ åˆ°æ€»æ¯”ç‰¹æµ
-        all_bits.push_back(bit);
-        all_validity.push_back(is_valid);
-
-        frame_count++;
+    // ´ò¿ªÊÓÆµÎÄ¼ş
+    VideoCapture cap(inputVideo);
+    if (!cap.isOpened()) {
+        cerr << "Error: Cannot open video file: " << inputVideo << endl;
+        return 1;
     }
 
-    // å°†æ¯”ç‰¹æµè½¬æ¢ä¸ºå­—èŠ‚
-    ofstream out_file(output_file, ios::binary);
-    ofstream valid_file(validity_file, ios::binary);
+    // ×¼±¸Êä³öÎÄ¼ş
+    ofstream outFile(outputBin, ios::binary);
+    ofstream validFile(validityBin, ios::binary);
 
-    for (size_t i = 0; i < all_bits.size(); i += 8) {
-        if (i + 7 >= all_bits.size()) break;
+    if (!outFile.is_open() || !validFile.is_open()) {
+        cerr << "Error: Cannot open output files" << endl;
+        return 1;
+    }
 
-        // ç»„åˆ8ä¸ªæ¯”ç‰¹ä¸ºä¸€ä¸ªå­—èŠ‚
-        unsigned char byte = 0;
-        unsigned char valid_byte = 0;
+    // ´¦ÀíÊÓÆµµÄÃ¿Ò»Ö¡
+    Mat frame;
+    int frameCount = 0;
+    vector<uchar> allData;
 
-        for (int j = 0; j < 8; j++) {
-            if (all_bits[i + j]) {
-                byte |= (1 << (7 - j));
-            }
-            if (all_validity[i + j]) {
-                valid_byte |= (1 << (7 - j));
-            }
+    // »ñÈ¡ÊÓÆµÖ¡ÂÊ
+    double fps = cap.get(CAP_PROP_FPS);
+    if (fps <= 0) fps = 30;
+
+    // ¼ÆËãÔ¤ÆÚÊı¾İÁ¿
+    int totalFrames = cap.get(CAP_PROP_FRAME_COUNT);
+    double duration = totalFrames / fps;
+    size_t expectedData = static_cast<size_t>(totalFrames * CodeParams::BytesPerFrame);
+
+    cout << "Video info: " << totalFrames << " frames, " << duration << " seconds" << endl;
+    cout << "Expected data size: " << expectedData / (1024 * 1024) << " MB" << endl;
+
+    while (cap.read(frame)) {
+        frameCount++;
+
+        // 1. ²éÕÒ¶şÎ¬Âë¶¨Î»±ê¼Ç
+        vector<Point2f> markers = findQRMarkers(frame);
+
+        if (markers.size() < 4) {
+            cerr << "Warning: Found only " << markers.size() << " markers in frame " << frameCount << endl;
+            continue;
         }
 
-        out_file.put(byte);
-        valid_file.put(valid_byte);
+        // 2. Í¸ÊÓ±ä»»Ğ£Õı
+        Mat corrected = correctPerspective(frame, markers);
+        if (corrected.empty()) {
+            cerr << "Warning: Perspective correction failed in frame " << frameCount << endl;
+            continue;
+        }
+
+        // 3. ´ÓĞ£ÕıºóµÄÍ¼ÏñÖĞÌáÈ¡Êı¾İ£¨Ã¿Ö¡1242×Ö½Ú£©
+        vector<uchar> frameData = extractDataFromQR(corrected);
+
+        if (frameData.size() != CodeParams::BytesPerFrame) {
+            cerr << "Warning: Extracted data size mismatch in frame " << frameCount
+                << ". Expected: " << CodeParams::BytesPerFrame
+                << ", Got: " << frameData.size() << endl;
+        }
+
+        // 4. ±£´æÖ¡Êı¾İ
+        allData.insert(allData.end(), frameData.begin(), frameData.end());
+
+        // ½ø¶È±¨¸æ
+        if (frameCount % 10 == 0) {
+            double progress = static_cast<double>(frameCount) / totalFrames * 100;
+            size_t dataSizeMB = allData.size() / (1024 * 1024);
+            cout << "Processed " << frameCount << " frames (" << fixed << setprecision(1)
+                << progress << "%), Data: " << dataSizeMB << " MB" << endl;
+        }
     }
 
-    out_file.close();
-    valid_file.close();
+    // Ğ´ÈëËùÓĞÊı¾İ
+    outFile.write(reinterpret_cast<const char*>(allData.data()), allData.size());
 
-    // æ¸…ç†ä¸´æ—¶æ–‡ä»¶
-    system("rmdir /s /q video_frames");
+    // Ğ´ÈëÓĞĞ§ĞÔĞÅÏ¢£¨¼òµ¥Æğ¼û£¬È«²¿±ê¼ÇÎªÓĞĞ§£©
+    vector<bool> validity(allData.size(), true);
+    for (size_t i = 0; i < validity.size(); i += 8) {
+        char byte = 0;
+        for (int j = 0; j < 8 && i + j < validity.size(); j++) {
+            if (validity[i + j]) {
+                byte |= (1 << (7 - j));
+            }
+        }
+        validFile.write(&byte, 1);
+    }
 
-    cout << "è§£ç å®Œæˆã€‚è¾“å‡ºæ–‡ä»¶: " << output_file << endl;
-    cout << "æœ‰æ•ˆæ€§æ–‡ä»¶: " << validity_file << endl;
-    cout << "å¤„ç†çš„å¸§æ•°: " << frame_count - 1 << endl;
+    // ÇåÀí×ÊÔ´
+    cap.release();
+    outFile.close();
+    validFile.close();
+
+    size_t totalBytes = allData.size();
+    cout << "Decoding completed." << endl;
+    cout << "Total frames processed: " << frameCount << endl;
+    cout << "Total data extracted: " << totalBytes << " bytes ("
+        << totalBytes / (1024.0 * 1024.0) << " MB)" << endl;
+    cout << "Output written to: " << outputBin << " and " << validityBin << endl;
 
     return 0;
 }

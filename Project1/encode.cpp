@@ -1,143 +1,412 @@
+#include <opencv2/opencv.hpp>
 #include <iostream>
 #include <fstream>
 #include <vector>
 #include <string>
-#include <sstream>
 #include <cstdlib>
+#include <ctime>
 #include <cmath>
-#include <windows.h>
-#include <direct.h> // ç”¨äºåˆ›å»ºç›®å½•
-#include <cstdint>
 
+using namespace cv;
 using namespace std;
 
-// BMPæ–‡ä»¶å¤´ç»“æ„
-#pragma pack(push, 1)
-struct BMPHeader {
-    uint16_t signature = 0x4D42; // "BM"
-    uint32_t fileSize;
-    uint16_t reserved1 = 0;
-    uint16_t reserved2 = 0;
-    uint32_t dataOffset;
-};
+// ¶şÎ¬Âë±àÂëÆ÷ÃüÃû¿Õ¼ä
+namespace Code
+{
+    constexpr int BytesPerFrame = 1242;
+    constexpr int FrameSize = 108;
+    constexpr int FrameOutputRate = 10;
+    constexpr int SafeAreaWidth = 2;
+    constexpr int QrPointSize = 18;
+    constexpr int SmallQrPointbias = 6;
+    constexpr int RectAreaCount = 7;
+    const Vec3b pixel[8] =
+    {
+        Vec3b(0,0,0), Vec3b(0,0,255), Vec3b(0,255,0), Vec3b(0,255,255),
+        Vec3b(255,0,0), Vec3b(255,0,255), Vec3b(255,255,0), Vec3b(255,255,255)
+    };
+    const int lenlim[RectAreaCount] = { 138,144,648,144,144,16,8 };
+    const int areapos[RectAreaCount][2][2] =
+    {
+        {{69,16},{QrPointSize + 3,SafeAreaWidth}},
+        {{16,72},{SafeAreaWidth,QrPointSize}},
+        {{72,72},{QrPointSize,QrPointSize}},
+        {{72,16},{QrPointSize,FrameSize - QrPointSize}},
+        {{16,72},{FrameSize - QrPointSize,QrPointSize}},
+        {{8,16},{FrameSize - QrPointSize,FrameSize - QrPointSize}},
+        {{8,8},{FrameSize - QrPointSize + 8,FrameSize - QrPointSize}}
+    };
 
-struct BMPInfoHeader {
-    uint32_t headerSize = 40;
-    int32_t width;
-    int32_t height;
-    uint16_t planes = 1;
-    uint16_t bitsPerPixel = 24;
-    uint32_t compression = 0;
-    uint32_t imageSize;
-    int32_t xPixelsPerMeter = 0;
-    int32_t yPixelsPerMeter = 0;
-    uint32_t colorsUsed = 0;
-    uint32_t colorsImportant = 0;
-};
-#pragma pack(pop)
+    enum color
+    {
+        Black = 0,
+        White = 7
+    };
 
-// ç”ŸæˆBMPå›¾åƒæ–‡ä»¶ï¼ˆå…¨é»‘æˆ–å…¨ç™½ï¼‰
-void generate_bmp(const string& filename, bool bit_value) {
-    ofstream bmp_file(filename, ios::binary);
-    if (!bmp_file) {
-        cerr << "æ— æ³•åˆ›å»ºBMPæ–‡ä»¶: " << filename << endl;
-        exit(1);
+    enum class FrameType
+    {
+        Start = 0,
+        End = 1,
+        StartAndEnd = 2,
+        Normal = 3
+    };
+
+    Mat ScaleToDisSize(const Mat& src)
+    {
+        Mat dis;
+        constexpr int FrameOutputSize = FrameSize * FrameOutputRate;
+        dis = Mat(FrameOutputSize, FrameOutputSize, CV_8UC3);
+        for (int i = 0; i < FrameOutputSize; ++i)
+        {
+            for (int j = 0; j < FrameOutputSize; ++j)
+            {
+                dis.at<Vec3b>(i, j) = src.at<Vec3b>(i / 10, j / 10);
+            }
+        }
+        return dis;
     }
 
-    int width = 640;
-    int height = 480;
-    int rowSize = (width * 3 + 3) & ~3; // æ¯è¡Œå­—èŠ‚æ•°ï¼ˆéœ€è¦4å­—èŠ‚å¯¹é½ï¼‰
-    int imageSize = rowSize * height;
+    uint16_t CalCheckCode(const unsigned char* info, int len, bool isStart, bool isEnd, uint16_t frameBase)
+    {
+        // 1. Ô­Âß¼­£º¼ÆËãÒ»¸ö³õÊ¼µÄĞ£ÑéÖµ£¨¿ÉÑ¡£¬Äã¿ÉÒÔ¸ù¾İĞèÇóµ÷Õû»òÒÆ³ı£©
+        uint16_t originalChecksum = 0;
+        int cutlen = (len / 2) * 2;
+        for (int i = 0; i < cutlen; i += 2)
+            originalChecksum ^= ((uint16_t)info[i] << 8) | info[i + 1];
+        if (len & 1)
+            originalChecksum ^= (uint16_t)info[cutlen] << 8;
+        originalChecksum ^= len;
+        originalChecksum ^= frameBase;
+        uint16_t temp = (isStart << 1) + isEnd;
+        originalChecksum ^= temp;
 
-    // è®¾ç½®BMPå¤´
-    BMPHeader bmpHeader;
-    bmpHeader.fileSize = sizeof(BMPHeader) + sizeof(BMPInfoHeader) + imageSize;
-    bmpHeader.dataOffset = sizeof(BMPHeader) + sizeof(BMPInfoHeader);
+        // 2. ½« originalChecksum (16Î»Êı¾İ) ±àÂëÎªº£Ã÷Âë (16+5=21Î»£¬µ«ÎÒÃÇÖ»¹ØĞÄĞ£ÑéÎ»)
+        // º£Ã÷ÂëĞ£ÑéÎ»ÊıÁ¿¼ÆËã£º2^r >= 16 + r + 1 => r=5
+        uint32_t data = originalChecksum; // 16Î»Êı¾İ
 
-    BMPInfoHeader bmpInfoHeader;
-    bmpInfoHeader.width = width;
-    bmpInfoHeader.height = height;
-    bmpInfoHeader.imageSize = imageSize;
+        // È·¶¨Ğ£ÑéÎ»µÄÎ»ÖÃ£¨ÔÚ21Î»º£Ã÷ÂëÖĞµÄÎ»ÖÃ£º1,2,4,8,16£©
+        // ³õÊ¼»¯º£Ã÷Âë£¬ËùÓĞÎ»ÉèÎª0
+        uint32_t hammingCode = 0;
 
-    // å†™å…¥BMPå¤´
-    bmp_file.write(reinterpret_cast<char*>(&bmpHeader), sizeof(BMPHeader));
-    bmp_file.write(reinterpret_cast<char*>(&bmpInfoHeader), sizeof(BMPInfoHeader));
+        // ½«Êı¾İÎ»·ÅÈëº£Ã÷ÂëÖĞ£¨Ìø¹ıĞ£ÑéÎ»µÄÎ»ÖÃ£©
+        int dataBitPos = 0;
+        for (int i = 1; i <= 21; i++) {
+            // Èç¹û i ²»ÊÇ 2 µÄÃİ´Î·½£¬ÔòÊÇÊı¾İÎ»
+            if ((i & (i - 1)) != 0) {
+                if (data & (1 << dataBitPos)) {
+                    hammingCode |= (1 << (i - 1));
+                }
+                dataBitPos++;
+            }
+        }
 
-    // ç”Ÿæˆå›¾åƒå†…å®¹ï¼ˆå…¨é»‘æˆ–å…¨ç™½ï¼‰
-    vector<uint8_t> pixelData(imageSize, 0);
+        // ¼ÆËãÃ¿¸öĞ£ÑéÎ»µÄÖµ
+        for (int i = 0; i < 5; i++) {
+            int parityBitPos = (1 << i) - 1; // Ğ£ÑéÎ»ÔÚº£Ã÷ÂëÖĞµÄÎ»ÖÃ£¨0-indexed: 0,1,3,7,15£©
+            uint32_t parity = 0;
 
-    if (bit_value) {
-        // ç™½è‰²è¡¨ç¤º1
-        for (int i = 0; i < imageSize; i++) {
-            pixelData[i] = 255;
+            // ±éÀúº£Ã÷ÂëµÄËùÓĞÎ»
+            for (int j = 1; j <= 21; j++) {
+                if (j & (1 << i)) { // Èç¹û¸ÃÎ»ÊÜµ±Ç°Ğ£ÑéÎ»Ğ£Ñé
+                    if (hammingCode & (1 << (j - 1))) {
+                        parity ^= 1;
+                    }
+                }
+            }
+            if (parity) {
+                hammingCode |= (1 << parityBitPos);
+            }
+        }
+
+        // 3. ÌáÈ¡º£Ã÷ÂëÖĞµÄ5¸öĞ£ÑéÎ»£¨Î»ÓÚÎ»ÖÃ1,2,4,8,16£©
+        uint16_t checkCode = 0;
+        checkCode |= ((hammingCode >> 0) & 1) << 0;  // Î»1
+        checkCode |= ((hammingCode >> 1) & 1) << 1;  // Î»2
+        checkCode |= ((hammingCode >> 3) & 1) << 2;  // Î»4
+        checkCode |= ((hammingCode >> 7) & 1) << 3;  // Î»8
+        checkCode |= ((hammingCode >> 15) & 1) << 4; // Î»16
+
+        return checkCode; // ·µ»Ø5Î»Ğ£ÑéÂë£¨´æ´¢ÔÚ16Î»±äÁ¿µÄµÍ5Î»£©
+    }
+    void BulidSafeArea(Mat& mat)
+    {
+        constexpr int pos[4][2][2] =
+        {
+            {{0,FrameSize},{0,SafeAreaWidth}},
+            {{0,FrameSize},{FrameSize - SafeAreaWidth,FrameSize}},
+            {{0, SafeAreaWidth },{0,FrameSize}},
+            {{FrameSize - SafeAreaWidth,FrameSize},{0,FrameSize}}
+        };
+        for (int k = 0; k < 4; ++k)
+            for (int i = pos[k][0][0]; i < pos[k][0][1]; ++i)
+                for (int j = pos[k][1][0]; j < pos[k][1][1]; ++j)
+                    mat.at<Vec3b>(i, j) = pixel[White];
+    }
+
+    void BulidQrPoint(Mat& mat)
+    {
+        // »æÖÆ´ó¶şÎ¬ÂëÊ¶±ğµã
+        constexpr int pointPos[4][2] =
+        {
+            {0,0},
+            {0,FrameSize - QrPointSize},
+            {FrameSize - QrPointSize,0}
+        };
+        const Vec3b vec3bBig[9] =
+        {
+            pixel[Black],
+            pixel[Black],
+            pixel[Black],
+            pixel[White],
+            pixel[White],
+            pixel[Black],
+            pixel[Black],
+            pixel[White],
+            pixel[White]
+        };
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < QrPointSize; ++j)
+                for (int k = 0; k < QrPointSize; ++k)
+                    mat.at<Vec3b>(pointPos[i][0] + j, pointPos[i][1] + k) =
+                    vec3bBig[(int)max(fabs(j - 8.5), fabs(k - 8.5))];
+
+        // »æÖÆĞ¡¶şÎ¬ÂëÊ¶±ğµã
+        constexpr int posCenter[2] = { FrameSize - SmallQrPointbias,FrameSize - SmallQrPointbias };
+        const Vec3b vec3bsmall[5] =
+        {
+            pixel[Black],
+            pixel[Black],
+            pixel[White],
+            pixel[Black],
+            pixel[White],
+        };
+        for (int i = -4; i <= 4; ++i)
+            for (int j = -4; j <= 4; ++j)
+                mat.at<Vec3b>(posCenter[0] + i, posCenter[1] + j) =
+                vec3bsmall[max(abs(i), abs(j))];
+    }
+
+    void BulidCheckCodeAndFrameNo(Mat& mat, uint16_t checkcode, uint16_t FrameNo)
+    {
+        for (int i = 0; i < 5; ++i) 
+        {
+            mat.at<Vec3b>(QrPointSize + 1, SafeAreaWidth + i) = pixel[(checkcode & 1) ? 7 : 0];
+            checkcode >>= 1;
+        }
+        for (int i = 0; i < 16; ++i)
+        {
+            mat.at<Vec3b>(QrPointSize + 2, SafeAreaWidth + i) = pixel[(FrameNo & 1) ? 7 : 0];
+            FrameNo >>= 1;
         }
     }
-    // å¦åˆ™ä¿æŒé»‘è‰²(0)
 
-    // å†™å…¥åƒç´ æ•°æ®
-    bmp_file.write(reinterpret_cast<char*>(pixelData.data()), imageSize);
-    bmp_file.close();
+    void BulidInfoRect(Mat& mat, const char* info, int len, int areaID)
+    {
+        const unsigned char* pos = (const unsigned char*)info;
+        const unsigned char* end = pos + len;
+        for (int i = 0; i < areapos[areaID][0][0]; ++i)
+        {
+            uint32_t outputCode = 0;
+            for (int j = 0; j < areapos[areaID][0][1] / 8; ++j)
+            {
+                outputCode |= *pos++;
+                for (int k = areapos[areaID][1][1]; k < areapos[areaID][1][1] + 8; ++k)
+                {
+                    mat.at<Vec3b>(i + areapos[areaID][1][0], j * 8 + k) = pixel[(outputCode & 1) ? 7 : 0];
+                    outputCode >>= 1;
+                }
+                if (pos == end) break;
+            }
+            if (pos == end) break;
+        }
+    }
+
+    void BulidFrameFlag(Mat& mat, FrameType frameType, int tailLen)
+    {
+        switch (frameType)
+        {
+        case FrameType::Start:
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth) = pixel[White];
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth + 1) = pixel[White];
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth + 2) = pixel[Black];
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth + 3) = pixel[Black];
+            break;
+        case FrameType::End:
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth) = pixel[Black];
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth + 1) = pixel[Black];
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth + 2) = pixel[White];
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth + 3) = pixel[White];
+            break;
+        case FrameType::StartAndEnd:
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth) = pixel[White];
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth + 1) = pixel[White];
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth + 2) = pixel[White];
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth + 3) = pixel[White];
+            break;
+        default:
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth) = pixel[Black];
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth + 1) = pixel[Black];
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth + 2) = pixel[Black];
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth + 3) = pixel[Black];
+            break;
+        }
+        for (int i = 4; i < 16; ++i)
+        {
+            mat.at<Vec3b>(QrPointSize, SafeAreaWidth + i) = pixel[(tailLen & 1) ? 7 : 0];
+            tailLen >>= 1;
+        }
+    }
+
+    Mat CodeFrame(FrameType frameType, const char* info, int tailLen, int FrameNo)
+    {
+        Mat codeMat = Mat(FrameSize, FrameSize, CV_8UC3, Vec3d(255, 255, 255));
+        if (frameType != FrameType::End && frameType != FrameType::StartAndEnd)
+            tailLen = BytesPerFrame;
+        BulidSafeArea(codeMat);
+        BulidQrPoint(codeMat);
+
+        int checkCode = CalCheckCode((const unsigned char*)info, tailLen,
+            frameType == FrameType::Start || frameType == FrameType::StartAndEnd,
+            frameType == FrameType::End || frameType == FrameType::StartAndEnd, FrameNo);
+        BulidFrameFlag(codeMat, frameType, tailLen);
+        BulidCheckCodeAndFrameNo(codeMat, checkCode, FrameNo % 65536);
+        if (tailLen != BytesPerFrame)
+            tailLen = BytesPerFrame;
+        for (int i = 0; i < RectAreaCount && tailLen>0; ++i)
+        {
+            int lennow = std::min(tailLen, lenlim[i]);
+            BulidInfoRect(codeMat, info, lennow, i);
+            tailLen -= lennow;
+            info += lennow;
+        }
+        return codeMat;
+    }
+
+    vector<Mat> GenerateQrFrames(const char* info, int len, int frameRate, int maxDurationMs)
+    {
+        vector<Mat> frames;
+        int maxFrames = (maxDurationMs * frameRate) / 1000;
+
+        if (maxFrames == 0) return frames;
+        if (len <= 0) return frames;
+
+        if (len <= BytesPerFrame)
+        {
+            unsigned char BUF[BytesPerFrame + 5];
+            memcpy(BUF, info, sizeof(unsigned char) * len);
+            for (int i = len; i < BytesPerFrame; ++i)
+                BUF[i] = rand() % 256;
+
+            Mat frame = CodeFrame(FrameType::StartAndEnd, (char*)BUF, len, 0);
+            frames.push_back(ScaleToDisSize(frame));
+        }
+        else
+        {
+            int frameCount = 0;
+            len -= BytesPerFrame;
+            Mat frame = ScaleToDisSize(CodeFrame(FrameType::Start, info, len, frameCount++));
+            frames.push_back(frame);
+
+            while (len > 0 && frames.size() < maxFrames)
+            {
+                info += BytesPerFrame;
+
+                if (len - BytesPerFrame > 0)
+                {
+                    if (frames.size() + 1 < maxFrames)
+                        frame = ScaleToDisSize(CodeFrame(FrameType::Normal, info, BytesPerFrame, frameCount++));
+                    else
+                        frame = ScaleToDisSize(CodeFrame(FrameType::End, info, BytesPerFrame, frameCount++));
+                }
+                else
+                {
+                    unsigned char BUF[BytesPerFrame + 5];
+                    memcpy(BUF, info, sizeof(unsigned char) * len);
+                    for (int i = len; i < BytesPerFrame; ++i)
+                        BUF[i] = rand() % 256;
+                    frame = ScaleToDisSize(CodeFrame(FrameType::End, (char*)BUF, len, frameCount++));
+                }
+
+                frames.push_back(frame);
+                len -= BytesPerFrame;
+            };
+        }
+
+        return frames;
+    }
 }
 
-int main(int argc, char* argv[]) {
-    if (argc != 4) {
-        cerr << "ç”¨æ³•: " << argv[0] << " <è¾“å…¥æ–‡ä»¶> <è¾“å‡ºè§†é¢‘> <æ—¶é•¿(æ¯«ç§’)>" << endl;
+int main(int argc, char* argv[])
+{
+    // ¼ì²é²ÎÊı
+    if (argc != 4)
+    {
+        cerr << "Usage: encode <input_file> <output_video> <duration_ms>" << endl;
         return 1;
     }
 
-    string input_file = argv[1];
-    string output_video = argv[2];
-    int duration_ms = stoi(argv[3]);
+    string inputFile = argv[1];
+    string outputVideo = argv[2];
+    int durationMs = atoi(argv[3]);
 
-    // è¯»å–è¾“å…¥æ–‡ä»¶
-    ifstream file(input_file, ios::binary);
-    if (!file) {
-        cerr << "æ— æ³•æ‰“å¼€è¾“å…¥æ–‡ä»¶: " << input_file << endl;
+    if (durationMs <= 0)
+    {
+        cerr << "Error: Duration must be a positive integer" << endl;
         return 1;
     }
 
-    // è¯»å–æ–‡ä»¶å†…å®¹åˆ°æ¯”ç‰¹æµ
-    vector<bool> bits;
-    char byte;
-    while (file.get(byte)) {
-        for (int i = 7; i >= 0; i--) {
-            bits.push_back((byte >> i) & 1);
-        }
+    // ¶ÁÈ¡ÊäÈëÎÄ¼ş
+    ifstream file(inputFile, ios::binary | ios::ate);
+    if (!file.is_open())
+    {
+        cerr << "Error: Cannot open input file" << endl;
+        return 1;
+    }
+
+    streamsize size = file.tellg();
+    file.seekg(0, ios::beg);
+
+    vector<char> buffer(size);
+    if (!file.read(buffer.data(), size))
+    {
+        cerr << "Error: Cannot read input file" << endl;
+        return 1;
     }
     file.close();
 
-    // è®¡ç®—å¸§æ•°å’Œæ¯å¸§åŒ…å«çš„æ¯”ç‰¹æ•°ï¼ˆæ¯å¸§ä¸€ä¸ªæ¯”ç‰¹ï¼‰
-    double fps = 30.0; // å‡è®¾30fps
-    double duration_sec = duration_ms / 1000.0;
-    int total_frames = static_cast<int>(round(fps * duration_sec));
+    // ÉèÖÃËæ»úÖÖ×Ó
+    srand(static_cast<unsigned int>(time(nullptr)));
 
-    // å¦‚æœæ¯”ç‰¹æ•°è¶…è¿‡å¯ä¼ è¾“çš„å¸§æ•°ï¼Œåˆ™æˆªæ–­
-    if (bits.size() > total_frames) {
-        bits.resize(total_frames);
-        cout << "è­¦å‘Š: æ•°æ®è¢«æˆªæ–­ï¼Œåªä¼ è¾“å‰ " << total_frames << " ä¸ªæ¯”ç‰¹" << endl;
+    // Éú³É¶şÎ¬ÂëÖ¡
+    int frameRate = 10; // ¹Ì¶¨Ö¡ÂÊ
+    vector<Mat> frames = Code::GenerateQrFrames(buffer.data(), size, frameRate, durationMs);
+
+    if (frames.empty())
+    {
+        cerr << "Error: No frames generated" << endl;
+        return 1;
     }
 
-    // åˆ›å»ºä¸´æ—¶ç›®å½•å­˜æ”¾å¸§
-    _mkdir("frames");
+    // ´´½¨ÊÓÆµĞ´ÈëÆ÷
+    Size frameSize = frames[0].size();
+    VideoWriter writer;
+    writer.open(outputVideo, VideoWriter::fourcc('m', 'p', '4', 'v'), frameRate, frameSize);
 
-    // ç”Ÿæˆå¸§å›¾åƒï¼ˆæ¯å¸§ä¸€ä¸ªæ¯”ç‰¹ï¼‰
-    for (int i = 0; i < bits.size(); i++) {
-        stringstream ss;
-        ss << "frames/frame_" << i << ".bmp";
-        generate_bmp(ss.str(), bits[i]);
+    if (!writer.isOpened())
+    {
+        cerr << "Error: Could not open video writer" << endl;
+        return 1;
     }
 
-    // ä½¿ç”¨FFmpegåˆ›å»ºè§†é¢‘
-    string cmd = "ffmpeg -r " + to_string(fps) +
-                 " -i frames/frame_%d.bmp -c:v libx264 -pix_fmt yuv420p " +
-                 output_video + " -y";
-    system(cmd.c_str());
+    // Ğ´ÈëÖ¡µ½ÊÓÆµ
+    for (const auto& frame : frames)
+    {
+        writer.write(frame);
+    }
 
-    // æ¸…ç†ä¸´æ—¶æ–‡ä»¶
-    system("rmdir /s /q frames");
-
-    cout << "è§†é¢‘ç¼–ç å®Œæˆ: " << output_video << endl;
-    cout << "ä¼ è¾“çš„æ¯”ç‰¹æ•°: " << bits.size() << endl;
+    writer.release();
+    cout << "Video encoded successfully: " << outputVideo << endl;
+    cout << "Frames: " << frames.size() << ", Duration: " << (frames.size() * 1000 / frameRate) << "ms" << endl;
 
     return 0;
 }
