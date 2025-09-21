@@ -10,7 +10,7 @@
 using namespace cv;
 using namespace std;
 
-// ¶şÎ¬Âë±àÂëÆ÷ÃüÃû¿Õ¼ä
+// äºŒç»´ç ç¼–ç å™¨å‘½åç©ºé—´
 namespace Code
 {
     constexpr int BytesPerFrame = 1242;
@@ -68,7 +68,7 @@ namespace Code
 
     uint16_t CalCheckCode(const unsigned char* info, int len, bool isStart, bool isEnd, uint16_t frameBase)
     {
-        // 1. Ô­Âß¼­£º¼ÆËãÒ»¸ö³õÊ¼µÄĞ£ÑéÖµ£¨¿ÉÑ¡£¬Äã¿ÉÒÔ¸ù¾İĞèÇóµ÷Õû»òÒÆ³ı£©
+        // 1. åŸé€»è¾‘ï¼šè®¡ç®—ä¸€ä¸ªåˆå§‹çš„æ ¡éªŒå€¼ï¼ˆå¯é€‰ï¼Œä½ å¯ä»¥æ ¹æ®éœ€æ±‚è°ƒæ•´æˆ–ç§»é™¤ï¼‰
         uint16_t originalChecksum = 0;
         int cutlen = (len / 2) * 2;
         for (int i = 0; i < cutlen; i += 2)
@@ -80,18 +80,18 @@ namespace Code
         uint16_t temp = (isStart << 1) + isEnd;
         originalChecksum ^= temp;
 
-        // 2. ½« originalChecksum (16Î»Êı¾İ) ±àÂëÎªº£Ã÷Âë (16+5=21Î»£¬µ«ÎÒÃÇÖ»¹ØĞÄĞ£ÑéÎ»)
-        // º£Ã÷ÂëĞ£ÑéÎ»ÊıÁ¿¼ÆËã£º2^r >= 16 + r + 1 => r=5
-        uint32_t data = originalChecksum; // 16Î»Êı¾İ
+        // 2. å°† originalChecksum (16ä½æ•°æ®) ç¼–ç ä¸ºæµ·æ˜ç  (16+5=21ä½ï¼Œä½†æˆ‘ä»¬åªå…³å¿ƒæ ¡éªŒä½)
+        // æµ·æ˜ç æ ¡éªŒä½æ•°é‡è®¡ç®—ï¼š2^r >= 16 + r + 1 => r=5
+        uint32_t data = originalChecksum; // 16ä½æ•°æ®
 
-        // È·¶¨Ğ£ÑéÎ»µÄÎ»ÖÃ£¨ÔÚ21Î»º£Ã÷ÂëÖĞµÄÎ»ÖÃ£º1,2,4,8,16£©
-        // ³õÊ¼»¯º£Ã÷Âë£¬ËùÓĞÎ»ÉèÎª0
+        // ç¡®å®šæ ¡éªŒä½çš„ä½ç½®ï¼ˆåœ¨21ä½æµ·æ˜ç ä¸­çš„ä½ç½®ï¼š1,2,4,8,16ï¼‰
+        // åˆå§‹åŒ–æµ·æ˜ç ï¼Œæ‰€æœ‰ä½è®¾ä¸º0
         uint32_t hammingCode = 0;
 
-        // ½«Êı¾İÎ»·ÅÈëº£Ã÷ÂëÖĞ£¨Ìø¹ıĞ£ÑéÎ»µÄÎ»ÖÃ£©
+        // å°†æ•°æ®ä½æ”¾å…¥æµ·æ˜ç ä¸­ï¼ˆè·³è¿‡æ ¡éªŒä½çš„ä½ç½®ï¼‰
         int dataBitPos = 0;
         for (int i = 1; i <= 21; i++) {
-            // Èç¹û i ²»ÊÇ 2 µÄÃİ´Î·½£¬ÔòÊÇÊı¾İÎ»
+            // å¦‚æœ i ä¸æ˜¯ 2 çš„å¹‚æ¬¡æ–¹ï¼Œåˆ™æ˜¯æ•°æ®ä½
             if ((i & (i - 1)) != 0) {
                 if (data & (1 << dataBitPos)) {
                     hammingCode |= (1 << (i - 1));
@@ -100,14 +100,14 @@ namespace Code
             }
         }
 
-        // ¼ÆËãÃ¿¸öĞ£ÑéÎ»µÄÖµ
+        // è®¡ç®—æ¯ä¸ªæ ¡éªŒä½çš„å€¼
         for (int i = 0; i < 5; i++) {
-            int parityBitPos = (1 << i) - 1; // Ğ£ÑéÎ»ÔÚº£Ã÷ÂëÖĞµÄÎ»ÖÃ£¨0-indexed: 0,1,3,7,15£©
+            int parityBitPos = (1 << i) - 1; // æ ¡éªŒä½åœ¨æµ·æ˜ç ä¸­çš„ä½ç½®ï¼ˆ0-indexed: 0,1,3,7,15ï¼‰
             uint32_t parity = 0;
 
-            // ±éÀúº£Ã÷ÂëµÄËùÓĞÎ»
+            // éå†æµ·æ˜ç çš„æ‰€æœ‰ä½
             for (int j = 1; j <= 21; j++) {
-                if (j & (1 << i)) { // Èç¹û¸ÃÎ»ÊÜµ±Ç°Ğ£ÑéÎ»Ğ£Ñé
+                if (j & (1 << i)) { // å¦‚æœè¯¥ä½å—å½“å‰æ ¡éªŒä½æ ¡éªŒ
                     if (hammingCode & (1 << (j - 1))) {
                         parity ^= 1;
                     }
@@ -118,15 +118,15 @@ namespace Code
             }
         }
 
-        // 3. ÌáÈ¡º£Ã÷ÂëÖĞµÄ5¸öĞ£ÑéÎ»£¨Î»ÓÚÎ»ÖÃ1,2,4,8,16£©
+        // 3. æå–æµ·æ˜ç ä¸­çš„5ä¸ªæ ¡éªŒä½ï¼ˆä½äºä½ç½®1,2,4,8,16ï¼‰
         uint16_t checkCode = 0;
-        checkCode |= ((hammingCode >> 0) & 1) << 0;  // Î»1
-        checkCode |= ((hammingCode >> 1) & 1) << 1;  // Î»2
-        checkCode |= ((hammingCode >> 3) & 1) << 2;  // Î»4
-        checkCode |= ((hammingCode >> 7) & 1) << 3;  // Î»8
-        checkCode |= ((hammingCode >> 15) & 1) << 4; // Î»16
+        checkCode |= ((hammingCode >> 0) & 1) << 0;  // ä½1
+        checkCode |= ((hammingCode >> 1) & 1) << 1;  // ä½2
+        checkCode |= ((hammingCode >> 3) & 1) << 2;  // ä½4
+        checkCode |= ((hammingCode >> 7) & 1) << 3;  // ä½8
+        checkCode |= ((hammingCode >> 15) & 1) << 4; // ä½16
 
-        return checkCode; // ·µ»Ø5Î»Ğ£ÑéÂë£¨´æ´¢ÔÚ16Î»±äÁ¿µÄµÍ5Î»£©
+        return checkCode; // è¿”å›5ä½æ ¡éªŒç ï¼ˆå­˜å‚¨åœ¨16ä½å˜é‡çš„ä½5ä½ï¼‰
     }
     void BulidSafeArea(Mat& mat)
     {
@@ -145,7 +145,7 @@ namespace Code
 
     void BulidQrPoint(Mat& mat)
     {
-        // »æÖÆ´ó¶şÎ¬ÂëÊ¶±ğµã
+        // ç»˜åˆ¶å¤§äºŒç»´ç è¯†åˆ«ç‚¹
         constexpr int pointPos[4][2] =
         {
             {0,0},
@@ -170,7 +170,7 @@ namespace Code
                     mat.at<Vec3b>(pointPos[i][0] + j, pointPos[i][1] + k) =
                     vec3bBig[(int)max(fabs(j - 8.5), fabs(k - 8.5))];
 
-        // »æÖÆĞ¡¶şÎ¬ÂëÊ¶±ğµã
+        // ç»˜åˆ¶å°äºŒç»´ç è¯†åˆ«ç‚¹
         constexpr int posCenter[2] = { FrameSize - SmallQrPointbias,FrameSize - SmallQrPointbias };
         const Vec3b vec3bsmall[5] =
         {
@@ -188,7 +188,7 @@ namespace Code
 
     void BulidCheckCodeAndFrameNo(Mat& mat, uint16_t checkcode, uint16_t FrameNo)
     {
-        for (int i = 0; i < 5; ++i) 
+        for (int i = 0; i < 5; ++i)
         {
             mat.at<Vec3b>(QrPointSize + 1, SafeAreaWidth + i) = pixel[(checkcode & 1) ? 7 : 0];
             checkcode >>= 1;
@@ -338,7 +338,7 @@ namespace Code
 
 int main(int argc, char* argv[])
 {
-    // ¼ì²é²ÎÊı
+    // æ£€æŸ¥å‚æ•°
     if (argc != 4)
     {
         cerr << "Usage: encode <input_file> <output_video> <duration_ms>" << endl;
@@ -355,7 +355,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // ¶ÁÈ¡ÊäÈëÎÄ¼ş
+    // è¯»å–è¾“å…¥æ–‡ä»¶
     ifstream file(inputFile, ios::binary | ios::ate);
     if (!file.is_open())
     {
@@ -374,11 +374,11 @@ int main(int argc, char* argv[])
     }
     file.close();
 
-    // ÉèÖÃËæ»úÖÖ×Ó
+    // è®¾ç½®éšæœºç§å­
     srand(static_cast<unsigned int>(time(nullptr)));
 
-    // Éú³É¶şÎ¬ÂëÖ¡
-    int frameRate = 10; // ¹Ì¶¨Ö¡ÂÊ
+    // ç”ŸæˆäºŒç»´ç å¸§
+    int frameRate = 10; // å›ºå®šå¸§ç‡
     vector<Mat> frames = Code::GenerateQrFrames(buffer.data(), size, frameRate, durationMs);
 
     if (frames.empty())
@@ -387,7 +387,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // ´´½¨ÊÓÆµĞ´ÈëÆ÷
+    // åˆ›å»ºè§†é¢‘å†™å…¥å™¨
     Size frameSize = frames[0].size();
     VideoWriter writer;
     writer.open(outputVideo, VideoWriter::fourcc('m', 'p', '4', 'v'), frameRate, frameSize);
@@ -398,7 +398,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // Ğ´ÈëÖ¡µ½ÊÓÆµ
+    // å†™å…¥å¸§åˆ°è§†é¢‘
     for (const auto& frame : frames)
     {
         writer.write(frame);
